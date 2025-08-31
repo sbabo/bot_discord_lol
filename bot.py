@@ -140,18 +140,16 @@ async def check_games():
                 for p in details["info"]["participants"]:
                     if p["puuid"] == puuid:
                         kda = f"{p['kills']}/{p['deaths']}/{p['assists']}"
-                        champ = p["championName"]
-                        win = "gagné" if p["win"] else "perdu"
+                        champ = p["championId"]
+                        result = "Victoire" if p["win"] else "Défaite"
                         queue = details["info"]["queueId"]
-                        gamemode = "SoloQ" if queue == 420 else "Flex" if queue == 440 else "Autre"
-                        await channel.send(f"{pseudo_riot} a fini sa partie {gamemode} avec **{champ}** : {win} - KDA: {kda} !")
+                        gamemode = "SoloQ" if queue == 420 else "Flex" if queue == 440 else "Normal/Custom"
+                        await send_game_end(channel, pseudo_riot, gamemode, champ, result, kda, last_match[0])
                         break
                 del active_games[discord_id]
 
 async def send_game_start(channel, pseudo_riot, gamemode, champion, match_id):
     champ_slug, champ_name = champ_from_id(champion)
-    print(f"Champion trouvé : {champ_name}")
-    print(f"Slug du champion : {champ_slug}")
     champ_icon_url = f"http://ddragon.leagueoflegends.com/cdn/13.6.1/img/champion/{champ_slug}.png"
 
     embed = discord.Embed(
@@ -165,6 +163,25 @@ async def send_game_start(channel, pseudo_riot, gamemode, champion, match_id):
     embed.set_thumbnail(url=champ_icon_url)
     
     embed.set_footer(text=f"Match ID: {match_id}")
+    await channel.send(embed=embed)
+
+async def send_game_end(channel, pseudo_riot, gamemode, champion_id, result, kda, match_id):
+    champ_slug, champ_name = champ_from_id(champion_id)
+    champ_icon_url = f"http://ddragon.leagueoflegends.com/cdn/13.6.1/img/champion/{champ_slug}.png"
+
+    embed = discord.Embed(
+        title="Victoire" if result == "gagné" else "Défaite",
+        description=f"{pseudo_riot} a terminé sa partie {gamemode} !",
+        color=discord.Color.green() if result == "gagné" else discord.Color.red(),
+    )
+    embed.add_field(name="Mode", value=gamemode)
+    embed.add_field(name="Champion", value=champ_name, inline=True)
+    embed.add_field(name="Résultat", value=result, inline=True)
+    embed.add_field(name="KDA", value=kda, inline=True)
+
+    embed.set_thumbnail(url=champ_icon_url)
+    embed.set_footer(text=f"Match ID: {match_id}")
+
     await channel.send(embed=embed)
 
 bot.run(TOKEN_DISCORD)
