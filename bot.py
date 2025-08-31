@@ -3,9 +3,11 @@ from discord.ext import commands, tasks # type: ignore
 import requests
 import asyncio
 import os
+from dotenv import load_dotenv
 
 print("Démarrage du bot...")
 
+load_dotenv()
 
 TOKEN_DISCORD = os.getenv("TOKEN_DISCORD")
 RIOT_API_KEY = os.getenv("RIOT_API_KEY")
@@ -31,6 +33,7 @@ def riot_access(url):
 @bot.event            
 async def on_ready():
     print(f"{bot.user} est connecté !")
+    # await test_last_match("OKj8ktwdPr5t4v0HGnMnq7TdfjON_vhd7rUss2WFYxVd_axHL71FGAyKStwO8mbf3NaDB0Dcy0e5GA", "SavvyStory#EUW")
     check_games.start()
 
 @bot.command(name="ping")
@@ -75,7 +78,7 @@ async def check_games():
             queue_id = str(data["gameQueueConfigId"])
             print(f"Queue ID: {queue_id}")
             # On vérifie que qu'il s'agit d'une SoloQ ou d'une Flex(440)
-            if queue_id in ["3100", "420", "440"]:
+            if queue_id in ["3100", "420", "440", "400"]:
                 print(f"Le joueur {discord_id} est en SoloQ ou Flex.")
                 match_id = str(data["gameId"])
                 
@@ -88,10 +91,10 @@ async def check_games():
             # Si le joueur n'est plus en partie
             if discord_id in active_games:
                 last_match_url = f"https://europe.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids"
-                last_match = riot_access(last_match_url)
+                last_match = riot_access(last_match_url).json()
                 details_url = f"https://europe.api.riotgames.com/lol/match/v5/matches/{last_match[0]}"
-                details = riot_access(details_url)
-                
+                details = riot_access(details_url).json()
+
                 # Recherche des stats du joueurs
                 for p in details["info"]["participants"]:
                     if p["puuid"] == puuid:
