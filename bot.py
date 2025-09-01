@@ -163,10 +163,12 @@ async def check_games():
                         del active_games[(p, m)]
 
 async def send_game_start(channel, pseudo_riot, gamemode, champ_name, champ_slug, match_id):
+    pseudo_formatted = pseudo_riot.replace("#", "-")
     champ_icon_url = f"http://ddragon.leagueoflegends.com/cdn/13.6.1/img/champion/{champ_slug}.png"
 
     embed = discord.Embed(
         title="Partie en cours",
+        url=f"https://porofessor.gg/fr/live/euw/{pseudo_formatted}",
         description=f"{pseudo_riot} est en partie {gamemode} !",
         color=discord.Color.blue()
     )
