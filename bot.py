@@ -183,6 +183,7 @@ async def send_game_end(channel, pseudo_riot, gamemode, champ_name, champ_slug, 
 
     embed = discord.Embed(
         title="Victoire" if result == "gagné" else "Défaite",
+        url=f"https://www.leagueofgraphs.com/fr/match/euw/{match_id}",
         description=f"{pseudo_riot} a terminé sa partie {gamemode} !",
         color=discord.Color.green() if result == "gagné" else discord.Color.red(),
     )
@@ -195,5 +196,5 @@ async def send_game_end(channel, pseudo_riot, gamemode, champ_name, champ_slug, 
     embed.set_footer(text=f"Match ID: {match_id}")
 
     await channel.send(embed=embed)
-
+    
 bot.run(TOKEN_DISCORD)
