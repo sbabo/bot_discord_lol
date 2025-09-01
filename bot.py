@@ -82,74 +82,87 @@ async def register(ctx, *, pseudo: str):
     if "puuid" not in res:
         await ctx.send("Riot ID invalide.")
         return
-    players[ctx.author.id] = {"puuid": res["puuid"], "name": pseudo}
+    players.setdefault(ctx.author.id, []).append({
+        "puuid": res["puuid"],
+        "name": pseudo
+    })
     await ctx.send(f"Riot ID {pseudo} enregistré avec succès.")
-    
+
 @tasks.loop(seconds=10)
 async def check_games():
-    
-    print(players)
-    for discord_id, info in players.items():
-        
-        info = players[discord_id]
-        pseudo_riot =info["name"]
-        puuid = info["puuid"]
+    channel = (bot.get_channel(int(CHANNEL_ID)) or await bot.fetch_channel(int(CHANNEL_ID)))
 
-        spectate_url = f"https://euw1.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{puuid}"
-        game = riot_access(spectate_url)
-        
-        champ = None
+    for discord_id, infos in players.items():
+        for info in infos:  # infos est une liste de comptes
+            puuid = info["puuid"]
+            pseudo_riot = info["name"]
 
-        channel = (bot.get_channel(int(CHANNEL_ID)) or await bot.fetch_channel(int(CHANNEL_ID)))
+            # Vérifier si le joueur est en partie
+            spectate_url = f"https://euw1.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{puuid}"
+            game_resp = riot_access(spectate_url)
 
-        print(f"Vérification du joueur {discord_id}...")
-        
-        # On vérifie le retour de l'API
-        if game.status_code == 200:
-            print(f"Le joueur {discord_id} est en partie.")
-            data = game.json()
-            queue_id = str(data["gameQueueConfigId"])
-            print(f"Queue ID: {queue_id}")
-            
-            # On vérifie le type de la partie
-            if queue_id in ["3100", "420", "440", "400"]:
-                print(f"Le joueur {discord_id} est en SoloQ ou Flex.")
-                gamemode = "SoloQ" if queue_id == "420" else "Flex" if queue_id == "440" else "Normal/Custom"
+            if game_resp.status_code == 200:
+                data = game_resp.json()
                 match_id = str(data["gameId"])
+                queue_id = str(data.get("gameQueueConfigId", -1))
 
-                for p in data['participants']:
-                    print(p)
-                    if p['puuid'] == puuid:
-                        champ = p['championId']
+                gamemode = {
+                    "420": "Classé Solo/Duo",
+                    "440": "Classé Flex",
+                    "400": "Normal Draft",
+                    "3100": "Custom"
+                }.get(queue_id, f"Queue {queue_id}")
+
+                # Trouver le champion joué
+                champ_id = None
+                for p in data.get("participants", []):
+                    if p.get("puuid") == puuid:
+                        champ_id = p.get("championId", 0)
                         break
 
-                # Si une nouvelle partie est détectée
-                if discord_id not in active_games or active_games[discord_id] != match_id:
-                    print(f"Nouvelle partie détectée pour le joueur {discord_id}.")
-                    active_games[discord_id] = match_id
-                    await send_game_start(channel, pseudo_riot, gamemode, champ, match_id)
-        else:
-            # Si le joueur n'est plus en partie
-            if discord_id in active_games:
-                last_match_url = f"https://europe.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids"
-                last_match = riot_access(last_match_url).json()
-                details_url = f"https://europe.api.riotgames.com/lol/match/v5/matches/{last_match[0]}"
-                details = riot_access(details_url).json()
+                champ_slug, champ_name = champ_from_id(champ_id)
 
-                # Recherche des stats du joueurs
-                for p in details["info"]["participants"]:
-                    if p["puuid"] == puuid:
-                        kda = f"{p['kills']}/{p['deaths']}/{p['assists']}"
-                        champ = p["championId"]
-                        result = "Victoire" if p["win"] else "Défaite"
-                        queue = details["info"]["queueId"]
-                        gamemode = "SoloQ" if queue == 420 else "Flex" if queue == 440 else "Normal/Custom"
-                        await send_game_end(channel, pseudo_riot, gamemode, champ, result, kda, last_match[0])
-                        break
-                del active_games[discord_id]
+                # Si nouvelle partie pour ce joueur
+                if (puuid, match_id) not in active_games:
+                    active_games[(puuid, match_id)] = True
+                    await send_game_start(channel, pseudo_riot, gamemode, champ_name, champ_slug, match_id)
 
-async def send_game_start(channel, pseudo_riot, gamemode, champion, match_id):
-    champ_slug, champ_name = champ_from_id(champion)
+            else:
+                # Si le joueur avait une partie en cours mais n'est plus en jeu
+                for (p, m) in list(active_games.keys()):
+                    if p == puuid:
+                        match_id = m  # Définit la variable pour éviter UnboundLocalError
+                        # Récupérer le dernier match
+                        last_match_url = f"https://europe.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?count=1"
+                        last_match = riot_access(last_match_url).json()
+                        if not last_match:
+                            del active_games[(p, m)]
+                            continue
+
+                        details_url = f"https://europe.api.riotgames.com/lol/match/v5/matches/{last_match[0]}"
+                        details = riot_access(details_url).json()
+
+                        # Chercher le joueur dans les participants
+                        for part in details["info"]["participants"]:
+                            if part["puuid"] == puuid:
+                                kda = f"{part['kills']}/{part['deaths']}/{part['assists']}"
+                                champ_slug, champ_name = champ_from_id(part["championId"])
+                                win = part["win"]
+                                queue = details["info"].get("queueId", -1)
+                                gamemode = {
+                                    420: "Classé Solo/Duo",
+                                    440: "Classé Flex",
+                                    400: "Normal Draft",
+                                    3100: "Custom"
+                                }.get(queue, f"Queue {queue}")
+
+                                await send_game_end(channel, pseudo_riot, gamemode, champ_name, champ_slug, win, kda, last_match[0])
+                                break
+
+                        # Supprimer la partie active
+                        del active_games[(p, m)]
+
+async def send_game_start(channel, pseudo_riot, gamemode, champ_name, champ_slug, match_id):
     champ_icon_url = f"http://ddragon.leagueoflegends.com/cdn/13.6.1/img/champion/{champ_slug}.png"
 
     embed = discord.Embed(
@@ -165,8 +178,7 @@ async def send_game_start(channel, pseudo_riot, gamemode, champion, match_id):
     embed.set_footer(text=f"Match ID: {match_id}")
     await channel.send(embed=embed)
 
-async def send_game_end(channel, pseudo_riot, gamemode, champion_id, result, kda, match_id):
-    champ_slug, champ_name = champ_from_id(champion_id)
+async def send_game_end(channel, pseudo_riot, gamemode, champ_name, champ_slug, result, kda, match_id):
     champ_icon_url = f"http://ddragon.leagueoflegends.com/cdn/13.6.1/img/champion/{champ_slug}.png"
 
     embed = discord.Embed(
@@ -176,7 +188,7 @@ async def send_game_end(channel, pseudo_riot, gamemode, champion_id, result, kda
     )
     embed.add_field(name="Mode", value=gamemode)
     embed.add_field(name="Champion", value=champ_name, inline=True)
-    embed.add_field(name="Résultat", value=result, inline=True)
+    embed.add_field(name="Résultat", value="Victoire" if result == "gagné" else "Défaite", inline=True)
     embed.add_field(name="KDA", value=kda, inline=True)
 
     embed.set_thumbnail(url=champ_icon_url)
