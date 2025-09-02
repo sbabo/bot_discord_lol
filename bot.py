@@ -60,8 +60,8 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Dictionnaires de stockage des données
-players = {}  # {discord_id: [{"puuid": str, "name": str}, ...]}
+# Liste des comptes Riot enregistrés
+players = []  # [{"puuid": str, "name": str, ...}]
 active_games = {}  # {(puuid, match_id): True}
 
 # Cache des champions League of Legends
@@ -164,10 +164,13 @@ async def register(ctx, *, pseudo: str):
     if "puuid" not in res:
         await ctx.send("Riot ID invalide.")
         return
-    players.setdefault(ctx.author.id, []).append({
-        "puuid": res["puuid"],
-        "name": pseudo
-    })
+    # Vérifie si le compte existe déjà
+    if any(acc["puuid"] == res["puuid"] for acc in players):
+        await ctx.send(f"Le compte {pseudo} est déjà enregistré.")
+        return
+    account = {"puuid": res["puuid"], "name": pseudo}
+    players.append(account)
+    update_lp(account["name"], account["puuid"])
     await ctx.send(f"Riot ID {pseudo} enregistré avec succès.")
 
 @tasks.loop(seconds=10)
@@ -182,75 +185,74 @@ async def check_games():
     """
     channel = (bot.get_channel(int(CHANNEL_ID)) or await bot.fetch_channel(int(CHANNEL_ID)))
 
-    for discord_id, infos in players.items():
-        for info in infos:  # infos est une liste de comptes
-            puuid = info["puuid"]
-            pseudo_riot = info["name"]
+    for info in players:
+        puuid = info["puuid"]
+        pseudo_riot = info["name"]
 
-            # Vérifier si le joueur est en partie
-            spectate_url = f"https://euw1.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{puuid}"
-            game_resp = riot_access(spectate_url)
+        # Vérifier si le joueur est en partie
+        spectate_url = f"https://euw1.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{puuid}"
+        game_resp = riot_access(spectate_url)
 
-            if game_resp.status_code == 200:
-                data = game_resp.json()
-                match_id = str(data["gameId"])
-                queue_id = str(data.get("gameQueueConfigId", -1))
+        if game_resp.status_code == 200:
+            data = game_resp.json()
+            match_id = str(data["gameId"])
+            queue_id = str(data.get("gameQueueConfigId", -1))
 
-                gamemode = {
-                    "420": "Classé Solo/Duo",
-                    "440": "Classé Flex",
-                    "400": "Normal Draft",
-                    "3100": "Custom"
-                }.get(queue_id, f"Queue {queue_id}")
+            gamemode = {
+                "420": "Classé Solo/Duo",
+                "440": "Classé Flex",
+                "400": "Normal Draft",
+                "3100": "Custom"
+            }.get(queue_id, f"Queue {queue_id}")
 
-                # Trouver le champion joué
-                champ_id = None
-                for p in data.get("participants", []):
-                    if p.get("puuid") == puuid:
-                        champ_id = p.get("championId", 0)
-                        break
+            # Trouver le champion joué
+            champ_id = None
+            for p in data.get("participants", []):
+                if p.get("puuid") == puuid:
+                    champ_id = p.get("championId", 0)
+                    break
 
-                champ_slug, champ_name = champ_from_id(champ_id)
+            champ_slug, champ_name = champ_from_id(champ_id)
 
-                # Si nouvelle partie pour ce joueur
-                if (puuid, match_id) not in active_games:
-                    active_games[(puuid, match_id)] = True
-                    await send_game_start(channel, pseudo_riot, gamemode, champ_name, champ_slug, match_id)
+            # Si nouvelle partie pour ce joueur
+            if (puuid, match_id) not in active_games:
+                active_games[(puuid, match_id)] = True
+                await send_game_start(channel, pseudo_riot, gamemode, champ_name, champ_slug, match_id)
 
-            else:
-                # Si le joueur avait une partie en cours mais n'est plus en jeu
-                for (p, m) in list(active_games.keys()):
-                    if p == puuid:
-                        match_id = m  # Définit la variable pour éviter UnboundLocalError
-                        # Récupérer le dernier match
-                        last_match_url = f"https://europe.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?count=1"
-                        last_match = riot_access(last_match_url).json()
-                        if not last_match:
-                            del active_games[(p, m)]
-                            continue
-
-                        details_url = f"https://europe.api.riotgames.com/lol/match/v5/matches/{last_match[0]}"
-                        details = riot_access(details_url).json()
-
-                        # Chercher le joueur dans les participants
-                        for part in details["info"]["participants"]:
-                            if part["puuid"] == puuid:
-                                kda = f"{part['kills']}/{part['deaths']}/{part['assists']}"
-                                champ_slug, champ_name = champ_from_id(part["championId"])
-                                win = part["win"]
-                                queue = details["info"].get("queueId", -1)
-                                gamemode = {
-                                    420: "Classé Solo/Duo",
-                                    440: "Classé Flex",
-                                    400: "Normal Draft",
-                                    3100: "Custom"
-                                }.get(queue, f"Queue {queue}")
-
-                                await send_game_end(channel, pseudo_riot, gamemode, champ_name, champ_slug, win, kda, last_match[0])
-                                break
-
-                        # Supprimer la partie active
+        else:
+            # Si le joueur avait une partie en cours mais n'est plus en jeu
+            for (p, m) in list(active_games.keys()):
+                if p == puuid:
+                    match_id = m  # Définit la variable pour éviter UnboundLocalError
+                    # Récupérer le dernier match
+                    last_match_url = f"https://europe.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?count=1"
+                    last_match = riot_access(last_match_url).json()
+                    if not last_match:
                         del active_games[(p, m)]
+                        continue
+
+                    details_url = f"https://europe.api.riotgames.com/lol/match/v5/matches/{last_match[0]}"
+                    details = riot_access(details_url).json()
+
+                    # Chercher le joueur dans les participants
+                    for part in details["info"]["participants"]:
+                        if part["puuid"] == puuid:
+                            kda = f"{part['kills']}/{part['deaths']}/{part['assists']}"
+                            champ_slug, champ_name = champ_from_id(part["championId"])
+                            win = part["win"]
+                            queue = details["info"].get("queueId", -1)
+                            gamemode = {
+                                420: "Classé Solo/Duo",
+                                440: "Classé Flex",
+                                400: "Normal Draft",
+                                3100: "Custom"
+                            }.get(queue, f"Queue {queue}")
+
+                            await send_game_end(channel, pseudo_riot, gamemode, champ_name, champ_slug, win, kda, last_match[0])
+                            break
+
+                    # Supprimer la partie active
+                    del active_games[(p, m)]
 
 async def send_game_start(channel, pseudo_riot, gamemode, champ_name, champ_slug, match_id):
     """
@@ -316,24 +318,33 @@ async def send_game_end(channel, pseudo_riot, gamemode, champ_name, champ_slug, 
     
 def update_lp(pseudo, puuid):
     """Met à jour les LP et le delta quotidien pour un joueur"""
-    url = f"https://euw1.api.riotgames.com/lol/league/v4/entries/by-summoner/{puuid}"
+    url = f"https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
     data = riot_access(url).json()
-    
-    #On recherche la file classé Solo/Duo
-    for entry in data:
-        if entry["queueType"] == "RANKED_SOLO_5x5":
-            # On pourrait stocker les LP et le delta ici
-            new_lp = entry["leaguePoints"]
-            tier = entry["tier"]
-            rank = entry["rank"]
-            
-            old_lp = players[pseudo].get("lp", new_lp)
-            diff = new_lp - old_lp
-            players[pseudo]["lp"] = new_lp
-            players[pseudo]["tier"] = tier
-            players[pseudo]["rank"] = rank
-            players[pseudo]["daily_lp"] = players[pseudo].get("daily_lp", 0) + diff
-            print(f"{pseudo} - LP mis à jour: {new_lp} ({'+' if diff > 0 else ''}{diff})")
+    print(data)
+    if data == []:
+        print(f"Aucun rang pour {pseudo}")
+        for acc in players:
+            if acc["puuid"] == puuid:
+                acc["rank"] = "Unranked"
+                acc["lp"] = 0
+        return
+    for queue in data:
+        print(queue)
+        if queue["queueType"] == "RANKED_SOLO_5x5":
+            new_lp = queue["leaguePoints"]
+            tier = queue["tier"]
+            rank = queue["rank"]
+            # Recherche le bon compte dans players
+            for acc in players:
+                if acc["puuid"] == puuid:
+                    old_lp = acc.get("lp", new_lp)
+                    diff = new_lp - old_lp
+                    acc["lp"] = new_lp
+                    acc["tier"] = tier
+                    acc["rank"] = rank
+                    acc["daily_lp"] = acc.get("daily_lp", 0) + diff
+                    print(f"{pseudo} - LP mis à jour: {new_lp} ({'+' if diff > 0 else ''}{diff})")
+                    break
             break
 
 @bot.command(name="leaderboard")
@@ -341,23 +352,14 @@ async def leaderboard(channel):
     if not players:
         await channel.send("Aucun joueur enregistré.")
         return
-    
     sorted_players = sorted(
-        players.values(),
+        players,
         key=lambda x: (x.get("tier", ""), x.get("rank", ""), x.get("lp", 0)),
         reverse=True
     )
-    """
-    Affiche le classement des joueurs enregistrés par LP.
-    
-    Cette fonction récupère le rang de chaque joueur via l'API Riot Games
-    et affiche un classement trié par points de ligue (LP).
-    """
-    
     embed = discord.Embed(
         title="Classement des joueurs",
         color=discord.Color.gold())
-    
     for i, p in enumerate(sorted_players, start=1):
         lp = p.get("lp", 0)
         tier = p.get("tier", "?")
@@ -367,7 +369,6 @@ async def leaderboard(channel):
             value=f"{tier} {rank} - {lp} LP",
             inline=False
         )
-
     await channel.send(embed=embed)
 
 keep_alive()
