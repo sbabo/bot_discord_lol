@@ -24,6 +24,8 @@ import os
 from dotenv import load_dotenv
 from flask import Flask
 from threading import Thread
+from datetime import datetime, timedelta
+
 
 # Configuration Flask pour keep-alive (déploiement)
 app = Flask("keep_alive")
@@ -159,8 +161,10 @@ async def on_ready():
     """Événement déclenché quand le bot est prêt."""
     print(f"{bot.user} est connecté !")
     load_champ_mapping()
-    # await test_last_match("OKj8ktwdPr5t4v0HGnMnq7TdfjON_vhd7rUss2WFYxVd_axHL71FGAyKStwO8mbf3NaDB0Dcy0e5GA", "SavvyStory#EUW")
     check_games.start()
+    if not daily_summary.is_running():
+        daily_summary.start()
+    print("Tâche daily_summary démarrée.")
 
 @bot.command(name="ping")
 async def ping(ctx):
@@ -196,7 +200,7 @@ async def register(ctx, *, pseudo: str):
     update_lp(account["name"], account["puuid"])
     await ctx.send(f"Riot ID {pseudo} enregistré avec succès.")
 
-@tasks.loop(seconds=10)
+@tasks.loop(seconds=60)
 async def check_games():
     """
     Boucle principale qui vérifie périodiquement l'état des parties.
@@ -294,7 +298,7 @@ async def send_game_start(channel, pseudo_riot, gamemode, champ_name, champ_slug
 
     embed = discord.Embed(
         title="Partie en cours",
-        url=f"https://porofessor.gg/fr/live/euw/{pseudo_formatted}",
+        url=f"https://www.op.gg/summoners/euw/{pseudo_formatted.replace(' ', '%20')}",
         description=f"{pseudo_riot} est en partie {gamemode} !",
         color=discord.Color.blue()
     )
@@ -423,6 +427,64 @@ async def leaderboard(channel):
             inline=False
         )
     await channel.send(embed=embed)
+
+@tasks.loop(hours=24)
+async def daily_summary():
+    now = datetime.utcnow() + timedelta(hours=2)  # fuseau EUW
+    if now.hour != 9:  # exécution uniquement à 9h du matin
+        return
+
+    channel = (bot.get_channel(int(CHANNEL_ID)) or await bot.fetch_channel(int(CHANNEL_ID)))
+    if not players:
+        await channel.send("Aucun joueur enregistré hier.")
+        return
+
+    # Embeds séparés
+    embed_solo = discord.Embed(
+        title=f"📊 Résumé SoloQ du { (now - timedelta(days=1)).strftime('%d/%m/%Y') }",
+        color=discord.Color.blue()
+    )
+    embed_flex = discord.Embed(
+        title=f"📊 Résumé FlexQ du { (now - timedelta(days=1)).strftime('%d/%m/%Y') }",
+        color=discord.Color.green()
+    )
+
+    for acc in players:
+        name = acc["name"]
+
+        # --- SOLO ---
+        solo = acc.get("solo", {"tier": "UNRANKED", "rank": "", "lp": 0, "daily_lp": 0, "wins": 0, "losses": 0})
+        total_games_solo = solo.get("wins", 0) + solo.get("losses", 0)
+        winrate_solo = f"{(solo.get('wins',0)/total_games_solo*100):.1f}%" if total_games_solo > 0 else "0%"
+        delta_solo = solo.get("daily_lp", 0)
+        sign_solo = "+" if delta_solo > 0 else ""
+        embed_solo.add_field(
+            name=name,
+            value=f"{solo['tier']} {solo['rank']} - {solo['lp']} LP (Δ {sign_solo}{delta_solo})\n"
+                  f"Victoires: {solo.get('wins',0)} - Défaites: {solo.get('losses',0)} ({winrate_solo})",
+            inline=False
+        )
+
+        # --- FLEX ---
+        flex = acc.get("flex", {"tier": "UNRANKED", "rank": "", "lp": 0, "daily_lp": 0, "wins": 0, "losses": 0})
+        total_games_flex = flex.get("wins", 0) + flex.get("losses", 0)
+        winrate_flex = f"{(flex.get('wins',0)/total_games_flex*100):.1f}%" if total_games_flex > 0 else "0%"
+        delta_flex = flex.get("daily_lp", 0)
+        sign_flex = "+" if delta_flex > 0 else ""
+        embed_flex.add_field(
+            name=name,
+            value=f"{flex['tier']} {flex['rank']} - {flex['lp']} LP (Δ {sign_flex}{delta_flex})\n"
+                  f"Victoires: {flex.get('wins',0)} - Défaites: {flex.get('losses',0)} ({winrate_flex})",
+            inline=False
+        )
+
+        # Reset du daily LP
+        solo["daily_lp"] = 0
+        flex["daily_lp"] = 0
+
+    # Envoi des embeds
+    await channel.send(embed=embed_solo)
+    await channel.send(embed=embed_flex)
 
 keep_alive()
 bot.run(TOKEN_DISCORD)
