@@ -67,6 +67,29 @@ active_games = {}  # {(puuid, match_id): True}
 # Cache des champions League of Legends
 champs_by_id = {}  # {champion_id: {"slug": str, "name": str}}
 
+# Ordre de rank pour le classement
+rank_order = {
+    "IRON": 1,
+    "BRONZE": 2,
+    "SILVER": 3,
+    "GOLD": 4,
+    "PLATINUM": 5,
+    "DIAMOND": 6,
+    "MASTER": 7,
+    "GRANDMASTER": 8,
+    "CHALLENGER": 9,
+    "UNRANKED": 99
+}
+
+# Ordre des divisions pour le classement
+division_order = {
+    "IV": 4,
+    "III": 3,
+    "II": 2,
+    "I": 1,
+    "": 99
+}
+
 def load_champ_mapping():
     """
     Charge la correspondance ID champion -> nom/slug depuis l'API Data Dragon.
@@ -317,45 +340,75 @@ async def send_game_end(channel, pseudo_riot, gamemode, champ_name, champ_slug, 
     
     
 def update_lp(pseudo, puuid):
-    """Met à jour les LP et le delta quotidien pour un joueur"""
+    """Met à jour les LP et le delta quotidien pour SoloQ + FlexQ"""
     url = f"https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
     data = riot_access(url).json()
-    print(data)
-    if data == []:
-        print(f"Aucun rang pour {pseudo}")
-        for acc in players:
-            if acc["puuid"] == puuid:
-                acc["rank"] = "Unranked"
-                acc["lp"] = 0
-        return
-    for queue in data:
-        print(queue)
-        if queue["queueType"] == "RANKED_SOLO_5x5":
-            new_lp = queue["leaguePoints"]
-            tier = queue["tier"]
-            rank = queue["rank"]
-            # Recherche le bon compte dans players
-            for acc in players:
-                if acc["puuid"] == puuid:
-                    old_lp = acc.get("lp", new_lp)
-                    diff = new_lp - old_lp
-                    acc["lp"] = new_lp
-                    acc["tier"] = tier
-                    acc["rank"] = rank
-                    acc["daily_lp"] = acc.get("daily_lp", 0) + diff
-                    print(f"{pseudo} - LP mis à jour: {new_lp} ({'+' if diff > 0 else ''}{diff})")
-                    break
+    
+    # Cherche le bon compte dans players (liste)
+    target_account = None
+    for acc in players:
+        if acc["puuid"] == puuid:
+            target_account = acc
             break
+
+    if not target_account:
+        print(f"Impossible de trouver {pseudo} ({puuid}) dans players")
+        return
+    
+    # Initialise si aucun rang
+    target_account["solo"] = {"tier": "UNRANKED", "rank": "", "lp": 0, "daily_lp": 0}
+    target_account["flex"] = {"tier": "UNRANKED", "rank": "", "lp": 0, "daily_lp": 0}
+
+    if not data:
+        print(f"Aucun rang pour {pseudo}")
+        return
+
+    for entry in data:
+        queue_type = entry["queueType"]
+        new_lp = entry["leaguePoints"]
+        tier = entry["tier"]
+        rank = entry["rank"]
+
+        if queue_type == "RANKED_SOLO_5x5":
+            old_lp = target_account["solo"].get("lp", new_lp)
+            diff = new_lp - old_lp
+            target_account["solo"] = {
+                "tier": tier,
+                "rank": rank,
+                "lp": new_lp,
+                "daily_lp": target_account["solo"].get("daily_lp", 0) + diff
+            }
+
+        elif queue_type == "RANKED_FLEX_SR":
+            old_lp = target_account["flex"].get("lp", new_lp)
+            diff = new_lp - old_lp
+            target_account["flex"] = {
+                "tier": tier,
+                "rank": rank,
+                "lp": new_lp,
+                "daily_lp": target_account["flex"].get("daily_lp", 0) + diff
+            }
 
 @bot.command(name="leaderboard")
 async def leaderboard(channel):
     if not players:
         await channel.send("Aucun joueur enregistré.")
         return
+    
+    leaderboard_players = []
+    for player in players:
+        solo = player.get("solo", {"tier": "UNRANKED", "rank": "", "lp": 0})
+        leaderboard_players.append({
+            "name": player["name"],
+            "tier": solo["tier"],
+            "rank": solo["rank"],
+            "lp": solo["lp"]
+        })
+    
     sorted_players = sorted(
-        players,
-        key=lambda x: (x.get("tier", ""), x.get("rank", ""), x.get("lp", 0)),
-        reverse=True
+        leaderboard_players,
+        key=lambda x: (rank_order.get(x["tier"], 0), division_order.get(x["rank"], 0), x["lp"] if x["tier"] != "UNRANKED" else -1),
+        reverse=False
     )
     embed = discord.Embed(
         title="Classement des joueurs",
