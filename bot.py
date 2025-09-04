@@ -327,14 +327,14 @@ async def send_game_end(channel, pseudo_riot, gamemode, champ_name, champ_slug, 
     champ_icon_url = f"http://ddragon.leagueoflegends.com/cdn/13.6.1/img/champion/{champ_slug}.png"
 
     embed = discord.Embed(
-        title="Victoire" if result == "gagné" else "Défaite",
+        title="Victoire" if result else "Défaite",
         url=f"https://www.leagueofgraphs.com/fr/match/euw/{match_id}",
         description=f"{pseudo_riot} a terminé sa partie {gamemode} !",
-        color=discord.Color.green() if result == "gagné" else discord.Color.red(),
+        color=discord.Color.green() if result else discord.Color.red(),
     )
     embed.add_field(name="Mode", value=gamemode)
     embed.add_field(name="Champion", value=champ_name, inline=True)
-    embed.add_field(name="Résultat", value="Victoire" if result == "gagné" else "Défaite", inline=True)
+    embed.add_field(name="Résultat", value="Victoire" if result else "Défaite", inline=True)
     embed.add_field(name="KDA", value=kda, inline=True)
 
     embed.set_thumbnail(url=champ_icon_url)
