@@ -24,7 +24,18 @@ import os
 from dotenv import load_dotenv
 from flask import Flask
 from threading import Thread
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
+    
+SCHEDULE_HOUR = 9
+SCHEDULE_MINUTE = 0
+TIMEZONE = ZoneInfo("Europe/Paris")
+
+last_daily_date = None
 
 
 # Configuration Flask pour keep-alive (déploiement)
@@ -162,9 +173,14 @@ async def on_ready():
     print(f"{bot.user} est connecté !")
     load_champ_mapping()
     check_games.start()
-    if not daily_summary.is_running():
-        daily_summary.start()
+    if not daily_summary_scheduler.is_running():
+        daily_summary_scheduler.start()
     print("Tâche daily_summary démarrée.")
+    
+@bot.command(name="daily")
+async def daily_command(ctx):
+    now = datetime.now(TIMEZONE)
+    await send_daily_summary(ctx.channel, now)
 
 @bot.command(name="ping")
 async def ping(ctx):
@@ -275,7 +291,17 @@ async def check_games():
                                 3100: "Custom"
                             }.get(queue, f"Queue {queue}")
 
-                            await send_game_end(channel, pseudo_riot, gamemode, champ_name, champ_slug, win, kda, last_match[0])
+                            await send_game_end(
+                                channel,
+                                pseudo_riot,
+                                gamemode,
+                                champ_name,
+                                champ_slug,
+                                win,
+                                kda,
+                                last_match[0],
+                                puuid=puuid
+                            )
                             break
 
                     # Supprimer la partie active
@@ -310,32 +336,54 @@ async def send_game_start(channel, pseudo_riot, gamemode, champ_name, champ_slug
     embed.set_footer(text=f"Match ID: {match_id}")
     await channel.send(embed=embed)
 
-async def send_game_end(channel, pseudo_riot, gamemode, champ_name, champ_slug, result, kda, match_id):
+async def send_game_end(channel, pseudo_riot, gamemode, champ_name, champ_slug, result, kda, match_id, puuid=None):
     """
-    Envoie un embed Discord avec les résultats d'une partie terminée.
-    
-    Args:
-        channel: Channel Discord où envoyer le message
-        pseudo_riot (str): Pseudo Riot du joueur
-        gamemode (str): Mode de jeu
-        champ_name (str): Nom du champion joué
-        champ_slug (str): Slug du champion pour l'URL de l'icône
-        result (bool): True si victoire, False si défaite
-        kda (str): Score KDA au format "kills/deaths/assists"
-        match_id (str): ID de la partie pour le lien LeagueOfGraphs
+    Envoie un embed Discord avec les résultats d'une partie terminée,
+    incluant les LP gagnés/perdus.
     """
     champ_icon_url = f"http://ddragon.leagueoflegends.com/cdn/13.6.1/img/champion/{champ_slug}.png"
+    match_id_url = match_id.replace("EUW1_", "")
 
+    # ---- LP ACTUELS ----
+    lp_change_text = "LP non disponible"
+    new_lp = None
+    if puuid:
+        league_url = f"https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
+        ranks = riot_access(league_url).json()
+        for entry in ranks:
+            if (gamemode == "Classé Solo/Duo" and entry["queueType"] == "RANKED_SOLO_5x5") or \
+               (gamemode == "Classé Flex" and entry["queueType"] == "RANKED_FLEX_SR"):
+                new_lp = entry["leaguePoints"]
+
+                # Récup ancien LP depuis players
+                old_lp = None
+                for acc in players:
+                    if acc["puuid"] == puuid:
+                        old_lp = acc.get("lp", new_lp)
+                        acc["lp"] = new_lp  # mise à jour du cache
+                        break
+
+                if old_lp is not None:
+                    diff = new_lp - old_lp
+                    signe = "+" if diff >= 0 else ""
+                    lp_change_text = f"{new_lp} ({signe}{diff}) LP"
+                else:
+                    lp_change_text = f"{new_lp} LP"
+                break
+
+    # ---- EMBED ----
     embed = discord.Embed(
-        title="Victoire" if result == "gagné" else "Défaite",
-        url=f"https://www.leagueofgraphs.com/fr/match/euw/{match_id}",
+        title="Victoire" if result else "Défaite",
+        url=f"https://www.leagueofgraphs.com/fr/match/euw/{match_id_url}",
         description=f"{pseudo_riot} a terminé sa partie {gamemode} !",
-        color=discord.Color.green() if result == "gagné" else discord.Color.red(),
+        color=discord.Color.green() if result else discord.Color.red(),
     )
     embed.add_field(name="Mode", value=gamemode)
     embed.add_field(name="Champion", value=champ_name, inline=True)
-    embed.add_field(name="Résultat", value="Victoire" if result == "gagné" else "Défaite", inline=True)
+    embed.add_field(name="Résultat", value="Victoire" if result else "Défaite", inline=True)
     embed.add_field(name="KDA", value=kda, inline=True)
+    if new_lp is not None:
+        embed.add_field(name="LP", value=lp_change_text, inline=False)
 
     embed.set_thumbnail(url=champ_icon_url)
     embed.set_footer(text=f"Match ID: {match_id}")
@@ -372,6 +420,8 @@ def update_lp(pseudo, puuid):
         new_lp = entry["leaguePoints"]
         tier = entry["tier"]
         rank = entry["rank"]
+        wins = entry["wins"]
+        losses = entry["losses"]
 
         if queue_type == "RANKED_SOLO_5x5":
             old_lp = target_account["solo"].get("lp", new_lp)
@@ -380,7 +430,9 @@ def update_lp(pseudo, puuid):
                 "tier": tier,
                 "rank": rank,
                 "lp": new_lp,
-                "daily_lp": target_account["solo"].get("daily_lp", 0) + diff
+                "daily_lp": target_account["solo"].get("daily_lp", 0) + diff,
+                "wins": wins,
+                "losses": losses
             }
 
         elif queue_type == "RANKED_FLEX_SR":
@@ -390,7 +442,9 @@ def update_lp(pseudo, puuid):
                 "tier": tier,
                 "rank": rank,
                 "lp": new_lp,
-                "daily_lp": target_account["flex"].get("daily_lp", 0) + diff
+                "daily_lp": target_account["flex"].get("daily_lp", 0) + diff,
+                "wins": wins,
+                "losses": losses
             }
 
 @bot.command(name="leaderboard")
@@ -428,63 +482,195 @@ async def leaderboard(channel):
         )
     await channel.send(embed=embed)
 
-@tasks.loop(hours=24)
-async def daily_summary():
-    now = datetime.utcnow() + timedelta(hours=2)  # fuseau EUW
-    if now.hour != 9:  # exécution uniquement à 9h du matin
-        return
-
-    channel = (bot.get_channel(int(CHANNEL_ID)) or await bot.fetch_channel(int(CHANNEL_ID)))
-    if not players:
-        await channel.send("Aucun joueur enregistré hier.")
-        return
-
-    # Embeds séparés
-    embed_solo = discord.Embed(
-        title=f"📊 Résumé SoloQ du { (now - timedelta(days=1)).strftime('%d/%m/%Y') }",
+async def send_daily_summary(channel, title="Résumé journalier"):
+    """
+    Envoie un résumé des performances de la veille pour chaque joueur.
+    Compare le rang/LP d'hier avec celui d'aujourd'hui.
+    """
+    soloq_embed = discord.Embed(
+        title=f"{title} - SoloQ",
         color=discord.Color.blue()
     )
-    embed_flex = discord.Embed(
-        title=f"📊 Résumé FlexQ du { (now - timedelta(days=1)).strftime('%d/%m/%Y') }",
-        color=discord.Color.green()
+    flex_embed = discord.Embed(
+        title=f"{title} - FlexQ",
+        color=discord.Color.purple()
     )
 
-    for acc in players:
-        name = acc["name"]
+    for pseudo, pdata in players.items():
+        # --- SoloQ ---
+        yesterday = yesterday_lp.get(pseudo, {}).get("solo", {"tier": "UNRANKED", "rank": "", "lp": 0})
+        today = pdata.get("solo", {"tier": "UNRANKED", "rank": "", "lp": 0})
 
-        # --- SOLO ---
-        solo = acc.get("solo", {"tier": "UNRANKED", "rank": "", "lp": 0, "daily_lp": 0, "wins": 0, "losses": 0})
-        total_games_solo = solo.get("wins", 0) + solo.get("losses", 0)
-        winrate_solo = f"{(solo.get('wins',0)/total_games_solo*100):.1f}%" if total_games_solo > 0 else "0%"
-        delta_solo = solo.get("daily_lp", 0)
-        sign_solo = "+" if delta_solo > 0 else ""
-        embed_solo.add_field(
-            name=name,
-            value=f"{solo['tier']} {solo['rank']} - {solo['lp']} LP (Δ {sign_solo}{delta_solo})\n"
-                  f"Victoires: {solo.get('wins',0)} - Défaites: {solo.get('losses',0)} ({winrate_solo})",
-            inline=False
+        delta_lp = today["lp"] - yesterday["lp"] if today["tier"] == yesterday["tier"] else today["lp"]
+        solo_summary = (
+            f"{pseudo}\n"
+            f"{yesterday['tier']} {yesterday['rank']} {yesterday['lp']} LP → "
+            f"{today['tier']} {today['rank']} {today['lp']} LP "
+            f"({'+' if delta_lp >= 0 else ''}{delta_lp} LP)\n"
+            f"**{today.get('wins', 0)}V - {today.get('losses', 0)}D "
+            f"({round((today.get('wins', 0) / max(1, today.get('wins', 0) + today.get('losses', 0))) * 100, 1)}% WR)**"
         )
+        soloq_embed.add_field(name=pseudo, value=solo_summary, inline=False)
 
-        # --- FLEX ---
-        flex = acc.get("flex", {"tier": "UNRANKED", "rank": "", "lp": 0, "daily_lp": 0, "wins": 0, "losses": 0})
-        total_games_flex = flex.get("wins", 0) + flex.get("losses", 0)
-        winrate_flex = f"{(flex.get('wins',0)/total_games_flex*100):.1f}%" if total_games_flex > 0 else "0%"
-        delta_flex = flex.get("daily_lp", 0)
-        sign_flex = "+" if delta_flex > 0 else ""
-        embed_flex.add_field(
-            name=name,
-            value=f"{flex['tier']} {flex['rank']} - {flex['lp']} LP (Δ {sign_flex}{delta_flex})\n"
-                  f"Victoires: {flex.get('wins',0)} - Défaites: {flex.get('losses',0)} ({winrate_flex})",
-            inline=False
+        # --- FlexQ ---
+        yesterday = yesterday_lp.get(pseudo, {}).get("flex", {"tier": "UNRANKED", "rank": "", "lp": 0})
+        today = pdata.get("flex", {"tier": "UNRANKED", "rank": "", "lp": 0})
+
+        delta_lp = today["lp"] - yesterday["lp"] if today["tier"] == yesterday["tier"] else today["lp"]
+        flex_summary = (
+            f"{pseudo}\n"
+            f"{yesterday['tier']} {yesterday['rank']} {yesterday['lp']} LP → "
+            f"{today['tier']} {today['rank']} {today['lp']} LP "
+            f"({'+' if delta_lp >= 0 else ''}{delta_lp} LP)\n"
+            f"**{today.get('wins', 0)}V - {today.get('losses', 0)}D "
+            f"({round((today.get('wins', 0) / max(1, today.get('wins', 0) + today.get('losses', 0))) * 100, 1)}% WR)**"
         )
+        flex_embed.add_field(name=pseudo, value=flex_summary, inline=False)
 
-        # Reset du daily LP
-        solo["daily_lp"] = 0
-        flex["daily_lp"] = 0
+    await channel.send(embed=soloq_embed)
+    await channel.send(embed=flex_embed)
 
-    # Envoi des embeds
-    await channel.send(embed=embed_solo)
-    await channel.send(embed=embed_flex)
+    # 🔄 Mettre à jour la référence "hier" pour demain
+    for pseudo, pdata in players.items():
+        yesterday_lp[pseudo] = {
+            "solo": {
+                "tier": pdata.get("solo", {}).get("tier", "UNRANKED"),
+                "rank": pdata.get("solo", {}).get("rank", ""),
+                "lp": pdata.get("solo", {}).get("lp", 0),
+            },
+            "flex": {
+                "tier": pdata.get("flex", {}).get("tier", "UNRANKED"),
+                "rank": pdata.get("flex", {}).get("rank", ""),
+                "lp": pdata.get("flex", {}).get("lp", 0),
+            }
+        }
+
+
+@tasks.loop(time=time(hour=9, tzinfo=TIMEZONE))
+async def daily_summary_scheduler():
+    global last_daily_date
+    now = datetime.now(TIMEZONE)
+    today = now.date()
+
+    if last_daily_date == today:
+        return  # déjà envoyé aujourd'hui
+
+    channel = (bot.get_channel(int(CHANNEL_ID)) or await bot.fetch_channel(int(CHANNEL_ID)))
+    try:
+        await send_daily_summary(channel, now)
+        last_daily_date = today
+        print(f"[daily_summary_scheduler] Sent daily summary for {(now - timedelta(days=1)).date()}")
+    except Exception as e:
+        print("[daily_summary_scheduler] erreur en envoyant le summary :", e)
+
+    
+    
+    
+@bot.command(name="dailytoday")
+async def dailytoday(ctx, *, pseudo: str):
+    """
+    Teste le résumé quotidien des parties ranked (SoloQ + Flex) jouées aujourd'hui,
+    limité aux 5 dernières parties.
+    
+    Usage:
+        !dailytoday Nom#TAG
+    """
+    if "#" not in pseudo:
+        await ctx.send("Format invalide : Nom#TAG")
+        return
+
+    name, tag = pseudo.split("#")
+
+    # --- Récup PUUID ---
+    url = f"https://europe.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{name}/{tag}"
+    res = riot_access(url).json()
+    if "puuid" not in res:
+        await ctx.send("Riot ID invalide.")
+        return
+    puuid = res["puuid"]
+
+    # --- Définir la plage de temps : aujourd'hui ---
+    now = datetime.now(TIMEZONE)
+    start_of_day = datetime(now.year, now.month, now.day, tzinfo=TIMEZONE)
+    start_ts = int(start_of_day.timestamp())
+    end_ts = int(now.timestamp())
+
+    # --- Récup matches d’aujourd’hui ---
+    url_matches = (
+        f"https://europe.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids"
+        f"?startTime={start_ts}&endTime={end_ts}&count=20"
+    )
+    match_ids = riot_access(url_matches).json()
+
+    if not match_ids:
+        await ctx.send("Aucune partie trouvée pour aujourd'hui.")
+        return
+
+    # --- Stats Solo / Flex ---
+    recap = {
+        "solo": {"wins": 0, "losses": 0, "games": []},
+        "flex": {"wins": 0, "losses": 0, "games": []}
+    }
+
+    for match_id in match_ids[:20]:
+        details_url = f"https://europe.api.riotgames.com/lol/match/v5/matches/{match_id}"
+        details = riot_access(details_url).json()
+
+        queue = details["info"].get("queueId", -1)
+        if queue not in (420, 440):  # ranked only
+            continue
+
+        # Trouver le joueur
+        participant = None
+        for part in details["info"]["participants"]:
+            if part["puuid"] == puuid:
+                participant = part
+                break
+        if not participant:
+            continue
+
+        win = participant["win"]
+        queue_type = "solo" if queue == 420 else "flex"
+
+        # Enregistrer le match
+        recap[queue_type]["wins"] += 1 if win else 0
+        recap[queue_type]["losses"] += 0 if win else 1
+        recap[queue_type]["games"].append(match_id)
+
+    # Garder les 5 derniers max
+    recap["solo"]["games"] = recap["solo"]["games"][:5]
+    recap["flex"]["games"] = recap["flex"]["games"][:5]
+
+    # --- Construire embeds ---
+    embed_solo = discord.Embed(
+        title=f"📊 Résumé SoloQ du {now.strftime('%d/%m/%Y')}",
+        color=discord.Color.blue()
+    )
+    wins, losses = recap["solo"]["wins"], recap["solo"]["losses"]
+    total = wins + losses
+    winrate = f"{(wins/total*100):.1f}%" if total > 0 else "0%"
+    embed_solo.add_field(
+        name=f"{pseudo}",
+        value=f"Victoires: {wins} - Défaites: {losses} ({winrate})\nDernières games: {len(recap['solo']['games'])}",
+        inline=False
+    )
+
+    embed_flex = discord.Embed(
+        title=f"📊 Résumé FlexQ du {now.strftime('%d/%m/%Y')}",
+        color=discord.Color.green()
+    )
+    wins, losses = recap["flex"]["wins"], recap["flex"]["losses"]
+    total = wins + losses
+    winrate = f"{(wins/total*100):.1f}%" if total > 0 else "0%"
+    embed_flex.add_field(
+        name=f"{pseudo}",
+        value=f"Victoires: {wins} - Défaites: {losses} ({winrate})\nDernières games: {len(recap['flex']['games'])}",
+        inline=False
+    )
+
+    await ctx.send(embed=embed_solo)
+    await ctx.send(embed=embed_flex)
+
 
 keep_alive()
 bot.run(TOKEN_DISCORD)
