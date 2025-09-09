@@ -389,10 +389,153 @@ async def on_ready():
     load_champ_mapping()
     print(f"{bot.user} est connecté !")
     
+    check_games.start()
+    print("Vérification des parties en cours démarrée.")
+    
     # Démarrage du planificateur de résumé quotidien
     if not daily_summary_scheduler.is_running():
         daily_summary_scheduler.start()
     print("Daily summary scheduler démarré.")
+# =============================================================================    
+# --- CHECK GAMES ---
+# =============================================================================
+
+@tasks.loop(seconds=60)
+async def check_games():
+    channel = bot.get_channel(int(CHANNEL_ID)) or await bot.fetch_channel(int(CHANNEL_ID))
+    data = load_data()
+    players = data.get("players", [])
+    
+    print("Vérification des parties en cours...")
+    print(f"Joueurs enregistrés: {[p['name'] for p in players]}")
+
+    for acc in players:
+        puuid = acc["puuid"]
+        pseudo_riot = acc["name"]
+
+        spectate_url = f"https://euw1.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{puuid}"
+        resp = riot_access(spectate_url)
+        
+        print(f"Vérification de {pseudo_riot}... Statut: {resp.status_code}")
+
+        if resp.status_code == 200:  # Partie en cours
+            data = resp.json()
+            match_id = str(data["gameId"])
+            queue_id = int(data.get("gameQueueConfigId", -1))  # 👈 cast en int direct
+
+            # 🔥 On ne garde que SoloQ (420) et FlexQ (440)
+            if queue_id not in [420, 440]:
+                print(f"Ignoré : {pseudo_riot} est en {queue_id}")
+                continue  
+
+            gamemode = {420: "Ranked SoloQ", 440: "Ranked FlexQ"}[queue_id]  # 👈 jamais "Autre"
+
+            champ_id = next((p["championId"] for p in data.get("participants", []) if p["puuid"] == puuid), 0)
+            champ_slug, champ_name = champ_from_id(champ_id)
+
+            if (puuid, match_id) not in active_games:
+                active_games[(puuid, match_id)] = True
+                await send_game_start(channel, pseudo_riot, gamemode, champ_name, champ_slug, match_id)
+
+        else:  # Vérifier si une partie SoloQ/FlexQ vient de se terminer
+            for (p, m) in list(active_games.keys()):
+                if p == puuid:
+                    last_match = riot_access(
+                        f"https://europe.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?count=1"
+                    ).json()
+                    if not last_match:
+                        del active_games[(p, m)]
+                        continue
+
+                    details = riot_access(f"https://europe.api.riotgames.com/lol/match/v5/matches/{last_match[0]}").json()
+                    queue = details["info"].get("queueId", -1)
+
+                    # 🔥 On ignore si ce n’est pas SoloQ/FlexQ
+                    if queue not in [420, 440]:
+                        del active_games[(p, m)]
+                        continue
+
+                    part = next(part for part in details["info"]["participants"] if part["puuid"] == puuid)
+
+                    kda = f"{part['kills']}/{part['deaths']}/{part['assists']}"
+                    champ_slug, champ_name = champ_from_id(part["championId"])
+                    win = part["win"]
+                    gamemode = {420: "SoloQ", 440: "FlexQ"}.get(queue, "Autre")
+
+                    # 🔥 Embed fin de partie
+                    await send_game_end(
+                        channel, pseudo_riot, gamemode, champ_name, champ_slug, win, kda, last_match[0], puuid=puuid
+                    )
+
+                    # 🔥 Mise à jour LP dans Supabase
+                    ranks = riot_access(f"https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}").json()
+                    for entry in ranks:
+                        if gamemode == "SoloQ" and entry["queueType"] == "RANKED_SOLO_5x5":
+                            acc["solo"] = {
+                                "tier": entry["tier"],
+                                "rank": entry["rank"],
+                                "lp": entry["leaguePoints"],
+                            }
+                        elif gamemode == "FlexQ" and entry["queueType"] == "RANKED_FLEX_SR":
+                            acc["flex"] = {
+                                "tier": entry["tier"],
+                                "rank": entry["rank"],
+                                "lp": entry["leaguePoints"],
+                            }
+
+                    save_data(players)
+                    del active_games[(p, m)]
+
+# =============================================================================
+# --- EMBED GAME ---
+# =============================================================================
+async def send_game_start(channel, pseudo_riot, gamemode, champ_name, champ_slug, match_id):
+    print(f"Envoi de l'embed de début de partie pour {pseudo_riot} ({gamemode})")
+    champ_icon_url = f"http://ddragon.leagueoflegends.com/cdn/13.6.1/img/champion/{champ_slug}.png"
+    pseudo_formatted = pseudo_riot.replace("#", "-")
+    embed = discord.Embed(
+        title="Partie en cours",
+        url=f"https://www.op.gg/summoners/euw/{pseudo_formatted.replace(' ', '%20')}",
+        description=f"{pseudo_riot} est en partie {gamemode} !",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="Mode", value=gamemode)
+    embed.add_field(name="Champion", value=champ_name)
+    embed.set_thumbnail(url=champ_icon_url)
+    embed.set_footer(text=f"Match ID: {match_id}")
+    await channel.send(embed=embed)
+
+
+async def send_game_end(channel, pseudo_riot, gamemode, champ_name, champ_slug, result, kda, match_id, puuid=None):
+    print(f"Envoi de l'embed de fin de partie pour {pseudo_riot} ({gamemode}) - {'Victoire' if result else 'Défaite'}")
+    champ_icon_url = f"http://ddragon.leagueoflegends.com/cdn/13.6.1/img/champion/{champ_slug}.png"
+    lp_text = ""
+    if puuid:
+        url = f"https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
+        ranks = riot_access(url).json()
+        for entry in ranks:
+            if (gamemode == "SoloQ" and entry["queueType"] == "RANKED_SOLO_5x5") or (
+                gamemode == "FlexQ" and entry["queueType"] == "RANKED_FLEX_SR"
+            ):
+                new_lp = entry["leaguePoints"]
+                lp_text = f"{entry['tier']} {entry['rank']} - {new_lp} LP"
+
+    match_id_url = match_id.replace("EUW1_","")
+    embed = discord.Embed(
+        title="Victoire" if result else "Défaite",
+        url=f"https://www.leagueofgraphs.com/fr/match/euw/{match_id_url}",
+        description=f"{pseudo_riot} a terminé sa partie {gamemode} !",
+        color=discord.Color.green() if result else discord.Color.red()
+    )
+    embed.add_field(name="Mode", value=gamemode)
+    embed.add_field(name="Champion", value=champ_name)
+    embed.add_field(name="Résultat", value="Victoire" if result else "Défaite")
+    embed.add_field(name="KDA", value=kda)
+    if lp_text:
+        embed.add_field(name="Nouveau rang", value=lp_text)
+    embed.set_thumbnail(url=champ_icon_url)
+    embed.set_footer(text=f"Match ID: {match_id}")
+    await channel.send(embed=embed)
 
 # =============================================================================
 # POINT D'ENTRÉE PRINCIPAL

@@ -44,6 +44,7 @@ Version : 1.0.0
 
 import json
 import os
+from dotenv import load_dotenv
 from supabase import create_client, Client
 
 # =============================================================================
@@ -51,6 +52,8 @@ from supabase import create_client, Client
 # =============================================================================
 
 # Variable d'environnement
+load_dotenv()
+
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BUCKET_NAME = "tracker-data"
