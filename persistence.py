@@ -31,8 +31,8 @@ Architecture des données :
     - last_updated : Timestamp de dernière mise à jour
 
 Auteur : Samuel
-Date de création : 2024
-Dernière modification : 2024
+Date de création : 2025
+Dernière modification : 2025
 Version : 1.0.0
 
 =============================================================================
@@ -44,10 +44,21 @@ Version : 1.0.0
 
 import json
 import os
+from supabase import create_client, Client
 
 # =============================================================================
 # CONFIGURATION GLOBALE
 # =============================================================================
+
+# Variable d'environnement
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+BUCKET_NAME = "tracker-data"
+FILE_NAME = "bot_data.json"
+
+
+# Initialisation du client Supabase
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Nom du fichier de données JSON pour la persistance
 DATA_FILE = "bot_data.json"
@@ -90,18 +101,15 @@ def load_data():
             }
         ]
     """
-    if not os.path.exists(DATA_FILE):
-        return []
-    
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        try:
-            data = json.load(f)
-            if isinstance(data, list):
-                return data
-            else:
-                return []
-        except Exception:
-            return []
+    try:
+        response = supabase.storage.from_(BUCKET_NAME).download(FILE_NAME)
+        if not response:
+            print("Aucune donnée trouvée, initialisation.")
+            return {"players": []}
+        return json.loads(response.decode("utf-8"))
+    except Exception as e:
+        print(f"Erreur lors du chargement des données : {e}")
+        return {"players": []}
 
 # =============================================================================
 # FONCTIONS DE SAUVEGARDE DES DONNÉES
@@ -135,8 +143,14 @@ def save_data(players_list):
         >>> players.append({"puuid": "ABC", "summoner_name": "Test"})
         >>> save_data(players)  # Sauvegarde automatique
     """
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(players_list, f, indent=4, ensure_ascii=False)
+    try:
+        json_data = json.dumps({"players": players_list}, indent=2)
+        supabase.storage.from_(BUCKET_NAME).upload(
+            FILE_NAME, json_data.encode("utf-8"), {"upsert": "true"}
+        )
+        print("Données sauvegardées avec succès sur Supabase.")
+    except Exception as e:
+        print(f"Erreur lors de la sauvegarde des données : {e}")
 
 # =============================================================================
 # FONCTIONS DE GESTION DES JOUEURS

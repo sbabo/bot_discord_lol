@@ -61,7 +61,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # =============================================================================
 
 # Chargement des données persistées depuis JSON
-players = load_data()           # Liste des joueurs enregistrés
+players = load_data()["players"]           # Liste des joueurs enregistrés
 active_games = {}               # Cache des parties en cours (pour suivi temps réel)
 champs_by_id = {}              # Cache des champions League of Legends
 
