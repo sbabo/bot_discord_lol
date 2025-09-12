@@ -78,6 +78,29 @@ division_order = {"IV": 4, "III": 3, "II": 2, "I": 1, "": 99}
 # Variable pour éviter les doublons de résumé quotidien
 last_daily_date = None
 
+# Mapping des régions pour l'API Riot
+REGIONAL_ROUTING = {
+    "br1": "americas",
+    "la1" : "americas",
+    "la2" : "americas",
+    "na1": "americas",
+    
+    "euw1": "europe",
+    "eun1": "europe",
+    "tr1": "europe",
+    "ru": "europe",
+    
+    "kr": "asia",
+    "jp1": "asia",
+    
+    "oc1": "sea",
+    "ph2": "sea",
+    "sg2": "sea",
+    "th2": "sea",
+    "tw2": "sea",
+    "vn2": "sea",
+}
+
 # =============================================================================
 # FLASK SERVER (KEEP-ALIVE POUR DÉPLOIEMENT)
 # =============================================================================
@@ -154,6 +177,16 @@ def champ_from_id(champ_id):
         return str(champ_id), f"Champion {champ_id}"
 
 # =============================================================================
+# FONCTIONS UTILITAIRES
+# =============================================================================
+
+def get_platform_and_region(player):
+    """Retourne le platform routing (euw1, na1, etc.) et le regional routing (europe, americas...)"""
+    platform = player.get("region", "euw1")
+    region = REGIONAL_ROUTING.get(platform, "europe")
+    return platform, region
+
+# =============================================================================
 # SYSTÈME DE SUIVI DES LP (LEAGUE POINTS)
 # =============================================================================
 
@@ -207,7 +240,7 @@ def update_lp(pseudo, puuid):
 # =============================================================================
 
 @bot.command(name="register")
-async def register(ctx, *, pseudo: str):
+async def register(ctx, *, pseudo: str, region: str ="euw1"):
     """
     Enregistre un compte Riot Games pour surveillance.
     
@@ -217,16 +250,23 @@ async def register(ctx, *, pseudo: str):
     
     Args:
         pseudo (str): Pseudo au format "Nom#TAG" (ex: "Player#EUW")
+        region (str): Région du compte (ex: euw1, na1, kr, etc.)
         
     Usage:
-        !register Player#EUW
+        !register Player#EUW euw1
     """
     if "#" not in pseudo:
         await ctx.send("Format invalide : Nom#TAG")
         return
         
     name, tag = pseudo.split("#")
-    url = f"https://europe.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{name}/{tag}"
+    region = region.lower()
+    if region not in REGIONAL_ROUTING:
+        await ctx.send(f"Région invalide. Choisissez parmi : {', '.join(REGIONAL_ROUTING.keys())}")
+        return
+    
+    regional = REGIONAL_ROUTING[region]
+    url = f"https://{regional}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{name}/{tag}"
     res = riot_access(url).json()
     
     if "puuid" not in res:
@@ -413,22 +453,24 @@ async def check_games():
         puuid = acc["puuid"]
         pseudo_riot = acc["name"]
 
-        spectate_url = f"https://euw1.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{puuid}"
+        platform, region = get_platform_and_region(acc)
+
+        spectate_url = f"https://{platform}.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/{puuid}"
         resp = riot_access(spectate_url)
-        
-        print(f"Vérification de {pseudo_riot}... Statut: {resp.status_code}")
+
+        print(f"Vérification de {pseudo_riot} ({platform}/{region})... Statut: {resp.status_code}")
 
         if resp.status_code == 200:  # Partie en cours
             data = resp.json()
             match_id = str(data["gameId"])
-            queue_id = int(data.get("gameQueueConfigId", -1))  # 👈 cast en int direct
+            queue_id = int(data.get("gameQueueConfigId", -1))  # cast en int direct
 
-            # 🔥 On ne garde que SoloQ (420) et FlexQ (440)
+            # On ne garde que SoloQ (420) et FlexQ (440)
             if queue_id not in [420, 440]:
                 print(f"Ignoré : {pseudo_riot} est en {queue_id}")
                 continue  
 
-            gamemode = {420: "Ranked SoloQ", 440: "Ranked FlexQ"}[queue_id]  # 👈 jamais "Autre"
+            gamemode = {420: "Ranked SoloQ", 440: "Ranked FlexQ"}[queue_id]
 
             champ_id = next((p["championId"] for p in data.get("participants", []) if p["puuid"] == puuid), 0)
             champ_slug, champ_name = champ_from_id(champ_id)
@@ -441,16 +483,16 @@ async def check_games():
             for (p, m) in list(active_games.keys()):
                 if p == puuid:
                     last_match = riot_access(
-                        f"https://europe.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?count=1"
+                        f"https://{region}.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids?count=1"
                     ).json()
                     if not last_match:
                         del active_games[(p, m)]
                         continue
 
-                    details = riot_access(f"https://europe.api.riotgames.com/lol/match/v5/matches/{last_match[0]}").json()
+                    details = riot_access(f"https://{region}.api.riotgames.com/lol/match/v5/matches/{last_match[0]}").json()
                     queue = details["info"].get("queueId", -1)
 
-                    # 🔥 On ignore si ce n’est pas SoloQ/FlexQ
+                    # On ignore si ce n’est pas SoloQ/FlexQ
                     if queue not in [420, 440]:
                         del active_games[(p, m)]
                         continue
@@ -462,13 +504,13 @@ async def check_games():
                     win = part["win"]
                     gamemode = {420: "SoloQ", 440: "FlexQ"}.get(queue, "Autre")
 
-                    # 🔥 Embed fin de partie
+                    # Embed fin de partie
                     await send_game_end(
                         channel, pseudo_riot, gamemode, champ_name, champ_slug, win, kda, last_match[0], puuid=puuid
                     )
 
-                    # 🔥 Mise à jour LP dans Supabase
-                    ranks = riot_access(f"https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}").json()
+                    # Mise à jour LP dans Supabase
+                    ranks = riot_access(f"https://{platform}.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}").json()
                     for entry in ranks:
                         if gamemode == "SoloQ" and entry["queueType"] == "RANKED_SOLO_5x5":
                             acc["solo"] = {
